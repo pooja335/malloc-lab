@@ -272,15 +272,28 @@ void *mm_realloc(void *p, size_t size)
 	printf("function: mm_realloc\n");
     void *oldptr = p;
     void *newptr;
-    size_t copySize;
+    size_t oldSize;
     
+    if (p == NULL) {
+    return mm_malloc(size);
+    }
+    if (size == 0) {
+    mm_free(p);
+    return NULL;
+    }
+
+    // malloc a new pointer
     newptr = mm_malloc(size);
-    if (newptr == NULL)
+    if (newptr == NULL) {
       return NULL;
-    copySize = *(size_t *)((char *)oldptr - SIZE_T_SIZE);
-    if (size < copySize)
-      copySize = size;
-    memcpy(newptr, oldptr, copySize);
+    }
+    
+    // copySize = *(size_t *)((char *)oldptr - SIZE_T_SIZE);
+    oldSize = BLOCKSIZE(HEADER(p));
+    if (size < oldSize) {
+      oldSize = size;
+    }
+    memcpy(newptr, oldptr, oldSize);
     mm_free(oldptr);
     return newptr;
 }
