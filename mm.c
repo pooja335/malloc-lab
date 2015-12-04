@@ -43,12 +43,19 @@ team_t team = {
 
 #define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
 
-#define WSIZE		4
-#define DSIZE		8
-#define CHUNKSIZE	(1<<12)
+#define WSIZE			4
+#define DSIZE			8
+#define MINBLOCKSIZE	24
+#define CHUNKSIZE		((1<<12) + 4)
 
+/* pointer to beginning of heap */
 static void *heap_listp;
+
+/* pointer to beginning of free list */
 static void *freelist_ptr;	
+
+/* pointer to where we should start looking (in function find_fit) for space to malloc */
+static void *find_fit_ptr;	
 
 /* read and write values to memory */
 #define GET(p)		(*(unsigned int *)(p))
@@ -72,12 +79,16 @@ static void *freelist_ptr;
 /* assembles header and footer */
 #define PACK(size, alloc)	((size) | (alloc))
 
+/* MAX */
 #define MAX(x, y)	(((x) > (y)) ? (x) : (y))
+
+/* MIN of pointers */
+#define MIN(p1, p2)	((((unsigned int *)(p1)) <= ((unsigned int *)(p2))) ? (p1) : (p2))
 
 /* helper functions */
 static void *extend_heap(size_t words);
 static void *coalesce(void *bp);
-static void *find_fit(size_t asize);
+static void *find_fit(size_t size);
 static void place(void *bp, size_t asize);
 static void mm_check(void);
 
@@ -86,18 +97,16 @@ static void mm_check(void);
  */
 int mm_init(void)
 {
-	printf("function: mm_init\n");
 	if ((heap_listp = mem_sbrk(4*WSIZE)) == (void *)-1) {
 		return -1;
 	}
 	SET(heap_listp, 0);
-	SET(heap_listp + WSIZE, PACK(DSIZE, 1));
+	SET(heap_listp + (1*WSIZE), PACK(DSIZE, 1));
 	SET(heap_listp + (2*WSIZE), PACK(DSIZE, 1));
 	SET(heap_listp + (3*WSIZE), PACK(0, 1));
 	heap_listp += (2*WSIZE);
-	// freelist_ptr = NULL;
-	// printf("mem_heap_lo: %d\n", (unsigned int)(mem_heap_lo()));
-	// printf("mem_heap_hi: %d\n", (unsigned int)(mem_heap_hi()));
+	freelist_ptr = NULL;
+	find_fit_ptr = heap_listp;
 	if (extend_heap(ALIGN(CHUNKSIZE/WSIZE)) == NULL) {
 		return -1;
 	}
@@ -107,7 +116,6 @@ int mm_init(void)
 /* function to extend the heap */
 static void *extend_heap(size_t words) 
 {
-	printf("function: extend_heap\n");
 	char *bp;
 	size_t size;
 
@@ -131,11 +139,6 @@ static void *extend_heap(size_t words)
 /* fuction used to coalesce */
 static void *coalesce(void *bp) 
 {
-	printf("function: coalesce\n");
-	// printf("bp: %d\n", (unsigned int)(bp));
-	// printf("bp next: %d\n", (unsigned int)(NEXT(bp)));
-	// printf("mem_heap_lo: %d\n", (unsigned int)(mem_heap_lo()));
-	// printf("mem_heap_hi: %d\n", (unsigned int)(mem_heap_hi()));
 	size_t prev_alloc = ISALLOC(FOOTER(PREV(bp)));
 	size_t next_alloc = ISALLOC(HEADER(NEXT(bp)));
 	size_t size = BLOCKSIZE(HEADER(bp));
@@ -163,32 +166,49 @@ static void *coalesce(void *bp)
 		SET(FOOTER(NEXT(bp)), PACK(size, 0));
 		bp = PREV(bp);
 	}
+
+	/* If find_fit_ptr points to a coalesced block, update find_fit_ptr to bp */
+	    if (find_fit_ptr > bp) {
+	    	if ((find_fit_ptr < (void *)(NEXT(bp)))) {
+	    		find_fit_ptr = bp;
+	    	}
+	    }
+
 	return bp;
 }
 
 
 /* function used to search free list for fit */
-static void *find_fit(size_t asize)
+static void *find_fit(size_t size)
 {
-	printf("function: find_fit\n");
-	void *bp;
-	for (bp = heap_listp; BLOCKSIZE(HEADER(bp)) > 0; bp = NEXT(bp)) {
-		// printf("find_fit");
-		// printf("bp: %d\n", (unsigned int)(bp));
-		// printf("bp next: %d\n", (unsigned int)(NEXT(bp)));
-		// printf("mem_heap_lo: %d\n", (unsigned int)(mem_heap_lo()));
-		// printf("mem_heap_hi: %d\n", (unsigned int)(mem_heap_hi()));
-		if (!ISALLOC(HEADER(bp)) && (asize <= BLOCKSIZE(HEADER(bp)))) {
-			return bp;
+	void *old_find_fit_ptr;
+	old_find_fit_ptr = find_fit_ptr;
+	
+	while (BLOCKSIZE(HEADER(find_fit_ptr)) > 0) {
+
+		/* if it finds a block, set find_fit_ptr to start there next time */
+		if (ISFREE(HEADER(find_fit_ptr)) && (size <= BLOCKSIZE(HEADER(find_fit_ptr)))) {
+			return find_fit_ptr;
 		}
+		find_fit_ptr = NEXT(find_fit_ptr);
 	}
+
+	/* if it doesn't find a block, start from beginning of heap */
+	find_fit_ptr = heap_listp;
+	while (find_fit_ptr < old_find_fit_ptr) {
+		if (ISFREE(HEADER(find_fit_ptr)) && (size <= BLOCKSIZE(HEADER(find_fit_ptr)))) {
+			return find_fit_ptr;
+		}
+		find_fit_ptr = NEXT(find_fit_ptr);
+	}
+
+	/* otherwise, if there isn't space in heap, return null */
 	return NULL;
 }
 
 /* function used to place requested block at beginning of free block */
 static void place(void *bp, size_t asize) 
 {
-	printf("function: place\n");
 	size_t csize = BLOCKSIZE(HEADER(bp));
 	if ((csize - asize) >= (2*DSIZE)) {
 		SET(HEADER(bp), PACK(asize, 1));
@@ -209,17 +229,6 @@ static void place(void *bp, size_t asize)
  */
 void *mm_malloc(size_t size)
 {
-/* 
-	int newsize = ALIGN(size + SIZE_T_SIZE);
-  	void *p = mem_sbrk(newsize);
-  	if (p == (void *)-1)
-		return NULL;
- 	else {
-  	     *(size_t *)p = size;
-  	     return (void *)((char *)p + SIZE_T_SIZE);
-  	}
-  */
-	printf("function: mm_malloc\n");
 	size_t asize;
 	size_t extendsize;
 	char *bp;
@@ -227,11 +236,11 @@ void *mm_malloc(size_t size)
 	if (size == 0) {
 		return NULL;
 	}
-	if (size <= 2*WSIZE) {
-		asize = 2*DSIZE;
+	if (size <= 2*DSIZE) {
+		asize = MINBLOCKSIZE;
 	}
 	else {
-		asize = DSIZE*((size + DSIZE + (DSIZE-1)) / DSIZE);
+		asize = (size + 2*DSIZE);
 	}
 	asize = ALIGN(asize);
 
@@ -241,7 +250,9 @@ void *mm_malloc(size_t size)
 	}
 
 	extendsize = MAX(asize, CHUNKSIZE);
-	if ((bp = extend_heap(ALIGN(extendsize/WSIZE))) == NULL) {return NULL;}
+	if ((bp = extend_heap(ALIGN(extendsize/WSIZE))) == NULL) {
+		return NULL;
+	}
 	place(bp, asize);
 	return bp;
 }
@@ -251,7 +262,6 @@ void *mm_malloc(size_t size)
  */
 void mm_free(void *p)
 {
-	printf("function: mm_free\n");
 	size_t size = BLOCKSIZE(HEADER(p));
 
 	SET(HEADER(p), PACK(size, 0));
@@ -260,35 +270,29 @@ void mm_free(void *p)
 
 }
 
-
-
-
-
 /*
  * mm_realloc - Implemented simply in terms of mm_malloc and mm_free
  */
 void *mm_realloc(void *p, size_t size)
 {
-	printf("function: mm_realloc\n");
     void *oldptr = p;
     void *newptr;
     size_t oldSize;
     
     if (p == NULL) {
-    return mm_malloc(size);
+    	return mm_malloc(size);
     }
     if (size == 0) {
-    mm_free(p);
-    return NULL;
+    	mm_free(p);
+    	return NULL;
     }
 
-    // malloc a new pointer
+    /* malloc a new pointer */
     newptr = mm_malloc(size);
     if (newptr == NULL) {
       return NULL;
     }
     
-    // copySize = *(size_t *)((char *)oldptr - SIZE_T_SIZE);
     oldSize = BLOCKSIZE(HEADER(p));
     if (size < oldSize) {
       oldSize = size;
@@ -312,7 +316,6 @@ void *mm_realloc(void *p, size_t size)
  */
 void mm_check(void)
 {
-	printf("function: mm_check\n");
     	/* check if all pointers point to valid heap address (in bounds) */
     	void *current = heap_listp;
 	while (current != NULL) {
